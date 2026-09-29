@@ -2,6 +2,7 @@ import os
 import logging
 
 from common import middleware, message_protocol, fruit_item
+from common.message_protocol.internal_message_enums import MsgField,MsgType
 
 MOM_HOST = os.environ["MOM_HOST"]
 INPUT_QUEUE = os.environ["INPUT_QUEUE"]
@@ -22,11 +23,33 @@ class JoinFilter:
         self.output_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, OUTPUT_QUEUE
         )
+        self.fruit_items_by_user = {}
+        self.top_count_by_user = {}
 
     def process_messsage(self, message, ack, nack):
         logging.info("Received top")
-        fruit_top = message_protocol.internal.deserialize(message)
-        self.output_queue.send(message_protocol.internal.serialize(fruit_top))
+        fields = message_protocol.internal.deserialize(message)
+        client_id = fields[MsgField.CLIENT_ID]
+
+        fruit_items = self.fruit_items_by_user.setdefault(client_id, [])
+        for fruit, amount in fields[MsgField.DATA]:
+            fruit_items.append(fruit_item.FruitItem(fruit, amount))
+
+        self.top_count_by_user[client_id] = self.top_count_by_user.get(client_id, 0) + 1
+        if self.top_count_by_user[client_id] < AGGREGATION_AMOUNT:
+            ack()
+            return
+
+        self.top_count_by_user.pop(client_id)
+        fruit_items = self.fruit_items_by_user.pop(client_id)
+        fruit_items.sort()
+        fruit_top = list(
+            map(
+                lambda fruit_item: (fruit_item.fruit, fruit_item.amount),
+                fruit_items[-TOP_SIZE:][::-1],
+            )
+        )
+        self.output_queue.send(message_protocol.internal.serialize({MsgField.TYPE: MsgType.DATA, MsgField.CLIENT_ID: client_id, MsgField.DATA: fruit_top}))
         ack()
 
     def start(self):
