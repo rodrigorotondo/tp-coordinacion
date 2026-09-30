@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 from common.message_protocol.internal_message_enums import MsgField,MsgType
@@ -25,6 +26,11 @@ class JoinFilter:
         )
         self.fruit_items_by_user = {}
         self.top_count_by_user = {}
+        signal.signal(signal.SIGTERM, self.handle_sigterm)
+
+    def handle_sigterm(self, signum, frame):
+        logging.info("Received SIGTERM signal")
+        self.input_queue.stop_consuming()
 
     def process_messsage(self, message, ack, nack):
         logging.info("Received top")
@@ -54,6 +60,8 @@ class JoinFilter:
 
     def start(self):
         self.input_queue.start_consuming(self.process_messsage)
+        self.input_queue.close()
+        self.output_queue.close()
 
 
 def main():

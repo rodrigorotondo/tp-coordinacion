@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 from common.message_protocol.internal_message_enums import MsgField,MsgType
@@ -32,14 +33,18 @@ class SumFilter:
             MOM_HOST, INPUT_QUEUE
         )
         self.data_output_exchanges = []
-        self.publish_control_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(MOM_HOST,SUM_CONTROL_EXCHANGE,[f"{SUM_PREFIX}_CONTROL"])
-        self.listen_control_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(MOM_HOST,SUM_CONTROL_EXCHANGE,[f"{SUM_PREFIX}_CONTROL"],channel=self.input_queue.channel)
+        self.control_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(MOM_HOST,SUM_CONTROL_EXCHANGE,[f"{SUM_PREFIX}_CONTROL"],channel=self.input_queue.channel)
         for i in range(AGGREGATION_AMOUNT):
             data_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
                 MOM_HOST, AGGREGATION_PREFIX, [f"{AGGREGATION_PREFIX}_{i}"]
             )
             self.data_output_exchanges.append(data_output_exchange)
         self.amount_by_fruit_by_user = {}
+        signal.signal(signal.SIGTERM, self.handle_sigterm)
+
+    def handle_sigterm(self, signum, frame):
+        logging.info("Received SIGTERM signal")
+        self.input_queue.stop_consuming()
 
     def _process_data(self, fields):
         logging.info(f"Process data")
@@ -54,14 +59,7 @@ class SumFilter:
   
     def _process_eof(self,fields):
         logging.info(f"Broadcasting EOF notice to sum instances")
-        self.publish_control_exchange.send(
-            message_protocol.internal.serialize(
-                {
-                    MsgField.TYPE: MsgType.EOF,
-                    MsgField.CLIENT_ID: fields[MsgField.CLIENT_ID],
-                }
-            )
-        )
+        self.control_exchange.send(message_protocol.internal.serialize({MsgField.TYPE:MsgType.EOF,MsgField.CLIENT_ID:fields[MsgField.CLIENT_ID]}))
 
     def _process_control_message(self, message, ack, nack):
         fields = message_protocol.internal.deserialize(message)
@@ -92,8 +90,11 @@ class SumFilter:
         ack()
 
     def start(self):
-        self.listen_control_exchange.register_consumer(self._process_control_message)
+        self.control_exchange.register_consumer(self._process_control_message)
         self.input_queue.start_consuming(self.process_data_messsage)
+        self.input_queue.close()
+        for data_output_exchange in self.data_output_exchanges:
+            data_output_exchange.close()
 
 def main():
     logging.basicConfig(level=logging.INFO)
